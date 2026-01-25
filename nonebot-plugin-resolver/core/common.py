@@ -3,7 +3,7 @@ import os
 import re
 import time
 from typing import List, Dict, Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, unquote
 from nonebot import require, logger
 
 require("nonebot_plugin_localstore")
@@ -73,7 +73,26 @@ async def download_img(url: str, path: str = '', proxy: str = None, session=None
     :return: 保存图片的路径。
     """
     if path == '':
-        path = os.path.join(os.getcwd(), url.split('/').pop())
+        parsed_url = urlparse(url)
+        filename = os.path.basename(parsed_url.path)
+        filename = unquote(filename)
+        filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
+
+        original_ext = os.path.splitext(filename)[1].lower()
+        ext = original_ext
+        if ext not in { ".jpg", ".jpeg", ".png", ".webp", ".gif" }:
+            query_params = parse_qs(parsed_url.query)
+            fmt = (query_params.get("format") or query_params.get("fmt") or [None])[0]
+            if fmt:
+                fmt = fmt.lower()
+                if fmt in { "jpg", "jpeg", "png", "webp", "gif" }:
+                    ext = f".{fmt}"
+        if not filename:
+            filename = f"{int(time.time())}{ext or '.jpg'}"
+        elif not original_ext:
+            filename = f"{filename}{ext or '.jpg'}"
+
+        path = os.path.join(os.getcwd(), filename)
     # 单个文件下载
     if session is None:
         async with aiohttp.ClientSession() as session:

@@ -596,14 +596,24 @@ async def twitter(bot: Bot, event: Event):
     # 海外服务器判断
     proxy = None if IS_OVERSEA else resolver_proxy
 
+    def is_image_url(url: str) -> bool:
+        parsed_url = urlparse(url)
+        ext = os.path.splitext(parsed_url.path)[1].lower()
+        if ext in { ".jpg", ".jpeg", ".png", ".webp", ".gif" }:
+            return True
+        query_params = parse_qs(parsed_url.query)
+        fmt = (query_params.get("format") or query_params.get("fmt") or [None])[0]
+        return bool(fmt and fmt.lower() in { "jpg", "jpeg", "png", "webp", "gif" })
+
     # 图片走转发，视频直接发送
-    if x_url_res.endswith(".jpg") or x_url_res.endswith(".png"):
-        res = await download_img(x_url_res, '', proxy)
-        aio_task_res = auto_determine_send_type(int(bot.self_id), res)
-        # 发送异步后的数据
-        await send_forward_both(bot, event, aio_task_res)
-        # 清除垃圾
+    if is_image_url(x_url_res):
+        res = await download_img(x_url_res, '', proxy, headers={ "Referer": "https://x.com/" } | COMMON_HEADER)
         if res and os.path.exists(res):
+            aio_task_res = auto_determine_send_type(int(bot.self_id), res)
+            if aio_task_res:
+                # 发送异步后的数据
+                await send_forward_both(bot, event, aio_task_res)
+            # 清除垃圾
             os.unlink(res)
     else:
         # 视频
@@ -909,12 +919,16 @@ def auto_determine_send_type(user_id: int, task: str):
     :param task:
     :return:
     """
-    if task.endswith("jpg") or task.endswith("png"):
+    if not task:
+        return None
+    task_lower = task.lower()
+    if task_lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
         return MessageSegment.node_custom(user_id=user_id, nickname=GLOBAL_NICKNAME,
                                           content=Message(MessageSegment.image(task)))
-    elif task.endswith("mp4"):
+    if task_lower.endswith((".mp4", ".m4v", ".mov", ".webm")):
         return MessageSegment.node_custom(user_id=user_id, nickname=GLOBAL_NICKNAME,
                                           content=Message(MessageSegment.video(task)))
+    return None
 
 
 def make_node_segment(user_id, segments: Union[MessageSegment, List]) -> Union[
