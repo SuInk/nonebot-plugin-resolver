@@ -2,7 +2,7 @@ import asyncio
 import os.path
 from functools import wraps
 from typing import cast, Iterable, Union
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 from bilibili_api import video, Credential, live, article
 from bilibili_api.favorite_list import get_video_favorite_list_content
@@ -54,6 +54,35 @@ GLOBAL_RESOLVE_CONTROLLER: list = split_and_strip(str(getattr(global_config, "gl
 BILI_SESSDATA: str = str(getattr(global_config, "bili_sessdata", ""))
 # 构建哔哩哔哩的Credential
 credential = Credential(sessdata=BILI_SESSDATA)
+
+def strip_bili_tracking_params(url: str) -> str:
+    """
+    Remove all non-essential query params from bilibili links.
+    """
+    try:
+        parsed = urlparse(url)
+        if not parsed.query:
+            return url
+        path = parsed.path.lower()
+        keep_keys = set()
+        if "/video/" in path:
+            keep_keys = { "p", "t", "list" }
+        elif "/bangumi/play" in path:
+            keep_keys = { "ep_id", "episode_id", "season_id", "p" }
+        elif "favlist" in path:
+            keep_keys = { "fid" }
+        query_items = parse_qsl(parsed.query, keep_blank_values=True)
+        filtered_items = []
+        for k, v in query_items:
+            if k not in keep_keys:
+                continue
+            if k == "p" and v == "1":
+                continue
+            filtered_items.append((k, v))
+        new_query = urlencode(filtered_items, doseq=True)
+        return urlunparse(parsed._replace(query=new_query))
+    except Exception:
+        return url
 
 bili23 = on_regex(
     r"(bilibili.com|b23.tv|bili2233.cn|^BV[0-9a-zA-Z]{10}$)", priority=1
@@ -204,20 +233,42 @@ async def bilibili(bot: Bot, event: Event) -> None:
     :return:
     """
     # 消息
-    url: str = str(event.message).strip()
+    raw_msg: str = str(event.message).strip()
+    url: str = raw_msg
     # 正则匹配
     url_reg = r"(http:|https:)\/\/(space|www|live).bilibili.com\/[A-Za-z\d._?%&+\-=\/#]*"
     b_short_rex = r"(https?://(?:b23\.tv|bili2233\.cn)/[A-Za-z\d._?%&+\-=\/#]+)"
     # BV处理
+    send_converted_link = False
     if re.match(r'^BV[1-9a-zA-Z]{10}$', url):
         url = 'https://www.bilibili.com/video/' + url
+        send_converted_link = True
     # 处理短号、小程序问题
     if "b23.tv" in url or "bili2233.cn" in url or "QQ小程序" in url:
-        b_short_url = re.search(b_short_rex, url.replace("\\", ""))[0]
-        resp = httpx.get(b_short_url, headers=BILIBILI_HEADER, follow_redirects=True)
-        url: str = str(resp.url)
+        b_short_match = re.search(b_short_rex, url.replace("\\", ""))
+        if b_short_match:
+            b_short_url = b_short_match[0]
+            resp = httpx.get(b_short_url, headers=BILIBILI_HEADER, follow_redirects=True)
+            url = str(resp.url)
+            if "QQ小程序" in raw_msg:
+                send_converted_link = True
+        elif "QQ小程序" in url:
+            bv_match = re.search(r"BV[0-9a-zA-Z]{10}", url)
+            if bv_match:
+                url = f'https://www.bilibili.com/video/{bv_match[0]}'
+                send_converted_link = True
     else:
-        url: str = re.search(url_reg, url).group(0)
+        url_match = re.search(url_reg, url)
+        if url_match:
+            url = url_match.group(0)
+    # 小程序/BV号转换链接后发送一次（仅发送链接）
+    url = strip_bili_tracking_params(url)
+    if send_converted_link and url.startswith("http"):
+        await bili23.send(Message(url))
+    # 兜底检查链接合法性
+    if not url.startswith("http"):
+        await bili23.send(Message(f"{GLOBAL_NICKNAME}识别：B站，获取链接失败"))
+        return
     # ===============发现解析的是动态，转移一下===============
     if ('t.bilibili.com' in url or '/opus' in url) and BILI_SESSDATA != '':
         # 去除多余的参数
@@ -545,19 +596,20 @@ async def twitter(bot: Bot, event: Event):
     # 海外服务器判断
     proxy = None if IS_OVERSEA else resolver_proxy
 
-    # 图片
+    # 图片走转发，视频直接发送
     if x_url_res.endswith(".jpg") or x_url_res.endswith(".png"):
         res = await download_img(x_url_res, '', proxy)
+        aio_task_res = auto_determine_send_type(int(bot.self_id), res)
+        # 发送异步后的数据
+        await send_forward_both(bot, event, aio_task_res)
+        # 清除垃圾
+        if res and os.path.exists(res):
+            os.unlink(res)
     else:
         # 视频
         res = await download_video(x_url_res, proxy)
-    aio_task_res = auto_determine_send_type(int(bot.self_id), res)
-
-    # 发送异步后的数据
-    await send_forward_both(bot, event, aio_task_res)
-
-    # 清除垃圾
-    os.unlink(res)
+        if res:
+            await auto_video_send(event, res)
 
 
 @xhs.handle()
