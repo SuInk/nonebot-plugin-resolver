@@ -1,4 +1,5 @@
 import asyncio
+import re
 import os.path
 import subprocess
 from functools import wraps
@@ -52,6 +53,15 @@ IS_OVERSEA: bool = bool(getattr(global_config, "is_oversea", False))
 VIDEO_DURATION_MAXIMUM: int = int(getattr(global_config, "video_duration_maximum", 900))
 # 全局解析内容控制
 GLOBAL_RESOLVE_CONTROLLER: list = split_and_strip(str(getattr(global_config, "global_resolve_controller", "[]")), ",")
+
+
+def parse_group_id_set(raw_value: object) -> set[int]:
+    raw_text = str(raw_value or "")
+    return {int(token) for token in re.findall(r"\d+", raw_text)}
+
+
+# 环境变量 RESOLVER_EXCLUDED_GROUPS：命中的群不执行任何链接解析。
+RESOLVER_EXCLUDED_GROUPS: set[int] = parse_group_id_set(getattr(global_config, "resolver_excluded_groups", ""))
 # 哔哩哔哩的 SESSDATA
 BILI_SESSDATA: str = str(getattr(global_config, "bili_sessdata", ""))
 # 构建哔哩哔哩的Credential
@@ -107,6 +117,9 @@ def resolve_handler(func):
         # 假设 `event` 是通过被装饰函数的参数传入的
         event = kwargs.get('event') or args[1]  # 根据位置参数或者关键字参数获取 event
         send_id = get_id_both(event)
+        if isinstance(event, GroupMessageEvent) and event.group_id in RESOLVER_EXCLUDED_GROUPS:
+            logger.info(f"群 {event.group_id} 已通过 RESOLVER_EXCLUDED_GROUPS 排除解析，不再执行")
+            return None
 
         if send_id not in resolve_shutdown_list_in_memory:
             return await func(*args, **kwargs)

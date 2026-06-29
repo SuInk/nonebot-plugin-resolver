@@ -74,6 +74,7 @@ R_GLOBAL_NICKNAME="" # 解析前缀名
 BILI_SESSDATA='' # bilibili sessdata 填写后可附加: 总结等功能
 VIDEO_DURATION_MAXIMUM=480 # 视频最大解析长度，默认480s为8分钟，计算公式为480s/60s=8mins
 GLOBAL_RESOLVE_CONTROLLER="" # 全局禁止的解析，示例 GLOBAL_RESOLVE_CONTROLLER="bilibili,dy" 表示禁止了哔哩哔哩和抖，GLOBAL_RESOLVE_CONTROLLER=""说明都不禁止，（大部分是缩写）请严格遵守选项: bilibili,dy,tiktok,ac,twitter,xiaohongshu,youtube.netease,kugou,wb
+RESOLVER_EXCLUDED_GROUPS="" # 全局排除解析的群号，示例 RESOLVER_EXCLUDED_GROUPS="123456,765205730"
 ```
 
 ## 🕹️ 开启 & 关闭解析
