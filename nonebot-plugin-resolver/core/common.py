@@ -52,53 +52,13 @@ async def download_video(url, proxy: str = None, ext_headers=None) -> str:
     try:
         async with httpx.AsyncClient(**client_config) as client:
             async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                content_type = resp.headers.get("content-type", "").lower()
-                if content_type and "video/" not in content_type and "octet-stream" not in content_type:
-                    raise ValueError(f"unexpected content-type: {content_type}")
                 async with aiofiles.open(path, "wb") as f:
                     async for chunk in resp.aiter_bytes():
                         await f.write(chunk)
         return path
     except Exception as e:
         print(f"下载视频错误原因是: {e}")
-        if os.path.exists(path):
-            os.unlink(path)
         return None
-
-
-async def probe_video_url(url: str, proxy: str = None, ext_headers=None) -> bool:
-    """
-    下载前检查 URL 是否能返回真实视频内容，避免把 403/HTML 当视频发送。
-    """
-    if ext_headers is None:
-        headers = COMMON_HEADER
-    else:
-        headers = COMMON_HEADER.copy()
-        headers.update(ext_headers)
-
-    client_config = {
-        'headers': headers,
-        'timeout': httpx.Timeout(20, connect=5.0),
-        'follow_redirects': True,
-    }
-    if proxy:
-        client_config['proxies'] = { 'https': proxy }
-
-    try:
-        async with httpx.AsyncClient(**client_config) as client:
-            response = await client.get(url, headers={ **headers, "Range": "bytes=0-0" })
-            if response.status_code not in (200, 206):
-                logger.warning(f"视频链接不可用 status={response.status_code} url={url}")
-                return False
-            content_type = response.headers.get("content-type", "").lower()
-            if "video/" not in content_type and "octet-stream" not in content_type:
-                logger.warning(f"视频链接 content-type 异常 type={content_type} url={url}")
-                return False
-            return True
-    except Exception as e:
-        logger.warning(f"视频链接探测失败: {type(e).__name__}: {e}")
-        return False
 
 
 async def download_img(url: str, path: str = '', proxy: str = None, session=None, headers=None) -> str:

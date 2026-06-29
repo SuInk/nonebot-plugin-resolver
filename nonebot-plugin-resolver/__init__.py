@@ -1,13 +1,7 @@
 import asyncio
-import json
 import os.path
-import shutil
-import subprocess
-import time
-import uuid
 from functools import wraps
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Union, cast
+from typing import cast, Iterable, Union
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 from bilibili_api import video, Credential, live, article
@@ -32,7 +26,7 @@ from .core.bili23 import download_b_file, merge_file_to_mp4, extra_bili_info
 from .core.common import *
 from .core.tiktok import generate_x_bogus_url, dou_transfer_other
 from .core.weibo import mid2id
-from .core.ytdlp import LAST_YTDLP_ERROR, get_video_title, download_ytb_video
+from .core.ytdlp import get_video_title, download_ytb_video
 
 __plugin_meta__ = PluginMetadata(
     name="链接分享解析器",
@@ -45,8 +39,7 @@ __plugin_meta__ = PluginMetadata(
 )
 
 # 配置加载
-driver = get_driver()
-global_config = Config.parse_obj(driver.config.dict())
+global_config = Config.parse_obj(get_driver().config.dict())
 # 全局名称
 GLOBAL_NICKNAME: str = str(getattr(global_config, "r_global_nickname", ""))
 # 🪜地址
@@ -54,12 +47,11 @@ resolver_proxy: str = getattr(global_config, "resolver_proxy", "http://127.0.0.1
 # 是否是海外服务器
 IS_OVERSEA: bool = bool(getattr(global_config, "is_oversea", False))
 # 哔哩哔哩限制的最大视频时长（默认8分钟），单位：秒
-VIDEO_DURATION_MAXIMUM: int = int(getattr(global_config, "video_duration_maximum", 900))
+VIDEO_DURATION_MAXIMUM: int = int(getattr(global_config, "video_duration_maximum", 480))
 # 全局解析内容控制
 GLOBAL_RESOLVE_CONTROLLER: list = split_and_strip(str(getattr(global_config, "global_resolve_controller", "[]")), ",")
 # 哔哩哔哩的 SESSDATA
 BILI_SESSDATA: str = str(getattr(global_config, "bili_sessdata", ""))
-RESOLVER_VIDEO_OUTBOX_DIR: str = str(getattr(global_config, "resolver_video_outbox_dir", "") or "")
 # 构建哔哩哔哩的Credential
 credential = Credential(sessdata=BILI_SESSDATA)
 
@@ -91,43 +83,6 @@ def strip_bili_tracking_params(url: str) -> str:
         return urlunparse(parsed._replace(query=new_query))
     except Exception:
         return url
-
-
-async def select_first_valid_video_url(
-    candidates: List[str],
-    headers: Optional[dict] = None,
-    proxy: Optional[str] = None,
-) -> Optional[str]:
-    """
-    按顺序探测候选视频链接，优先返回 200/206 且 content-type 为 video 的 URL。
-    """
-    seen = set()
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        if await probe_video_url(candidate, proxy=proxy, ext_headers=headers):
-            return candidate
-    return None
-
-
-async def select_xhs_video_url(note_data: dict, headers: dict) -> Optional[str]:
-    stream = note_data.get("video", {}).get("media", {}).get("stream", {})
-    candidates: List[str] = []
-    for stream_key in ("h264", "h265", "av1"):
-        stream_items = stream.get(stream_key) or []
-        for item in stream_items:
-            if not isinstance(item, dict):
-                continue
-            master_url = item.get("masterUrl")
-            if master_url:
-                candidates.append(master_url)
-            backup_urls = item.get("backupUrls") or item.get("backupUrl") or item.get("backup_urls") or []
-            if isinstance(backup_urls, str):
-                candidates.append(backup_urls)
-            elif isinstance(backup_urls, list):
-                candidates.extend(str(url) for url in backup_urls if url)
-    return await select_first_valid_video_url(candidates, headers=headers)
 
 bili23 = on_regex(
     r"(bilibili.com|b23.tv|bili2233.cn|^BV[0-9a-zA-Z]{10}$)", priority=1
@@ -412,10 +367,10 @@ async def bilibili(bot: Bot, event: Event) -> None:
     # 截断下载时间比较长的视频
     online = await v.get_online()
     online_str = f'🏄‍♂️ 总共 {online["total"]} 人在观看，{online["count"]} 人在网页端观看'
-    video_meta_message = Message(MessageSegment.image(video_cover)) + Message(
-        f"\n{GLOBAL_NICKNAME}识别：B站，{video_title}\n{extra_bili_info(video_info)}\n📝 简介：{video_desc}\n{online_str}"
-    )
-    if video_duration > VIDEO_DURATION_MAXIMUM:
+    if video_duration <= VIDEO_DURATION_MAXIMUM:
+        await bili23.send(Message(MessageSegment.image(video_cover)) + Message(
+            f"\n{GLOBAL_NICKNAME}识别：B站，{video_title}\n{extra_bili_info(video_info)}\n📝 简介：{video_desc}\n{online_str}"))
+    else:
         return await bili23.finish(
             Message(MessageSegment.image(video_cover)) + Message(
                 f"\n{GLOBAL_NICKNAME}识别：B站，{video_title}\n{extra_bili_info(video_info)}\n简介：{video_desc}\n{online_str}\n---------\n⚠️ 当前视频时长 {video_duration // 60} 分钟，超过管理员设置的最长时间 {VIDEO_DURATION_MAXIMUM // 60} 分钟！"))
@@ -437,7 +392,7 @@ async def bilibili(bot: Bot, event: Event) -> None:
         logger.info(remove_res)
     # 发送出去
     # await bili23.send(Message(MessageSegment.video(f"{path}-res.mp4")))
-    await auto_video_send(event, f"{path}-res.mp4", video_meta_message)
+    await auto_video_send(event, f"{path}-res.mp4")
     # 这里是总结内容，如果写了cookie就可以
     if BILI_SESSDATA != '':
         ai_conclusion = await v.get_ai_conclusion(await v.get_cid(0))
@@ -504,7 +459,7 @@ async def dy(bot: Bot, event: Event) -> None:
             # 判断是图片还是视频
             url_type_code = detail['aweme_type']
             url_type = URL_TYPE_CODE_DICT.get(url_type_code, 'video')
-            douyin_meta_message = Message(f"{GLOBAL_NICKNAME}识别：抖音，{detail.get('desc')}")
+            await douyin.send(Message(f"{GLOBAL_NICKNAME}识别：抖音，{detail.get('desc')}"))
             # 根据类型进行发送
             if url_type == 'video':
                 # 识别播放地址
@@ -513,9 +468,8 @@ async def dy(bot: Bot, event: Event) -> None:
                 # 发送视频
                 # logger.info(player_addr)
                 # await douyin.send(Message(MessageSegment.video(player_addr)))
-                await auto_video_send(event, player_real_addr, douyin_meta_message)
+                await auto_video_send(event, player_real_addr)
             elif url_type == 'image':
-                await douyin.send(douyin_meta_message)
                 # 无水印图片列表/No watermark image list
                 no_watermark_image_list = []
                 # 有水印图片列表/With watermark image list
@@ -566,9 +520,11 @@ async def tiktok(event: Event) -> None:
         url = re.search(url_reg, url)[0]
     title = await get_video_title(url, IS_OVERSEA, resolver_proxy, 'tiktok')
 
+    await tik.send(Message(f"{GLOBAL_NICKNAME}识别：TikTok，{title}\n"))
+
     target_tik_video_path = await download_ytb_video(url, IS_OVERSEA, os.getcwd(), resolver_proxy, 'tiktok')
 
-    await auto_video_send(event, target_tik_video_path, Message(f"{GLOBAL_NICKNAME}识别：TikTok，{title}\n"))
+    await auto_video_send(event, target_tik_video_path)
 
 
 @acfun.handle()
@@ -588,13 +544,13 @@ async def ac(event: Event) -> None:
         inputMsg = f"https://www.acfun.cn/v/ac{re.search(r'ac=([^&?]*)', inputMsg)[1]}"
 
     url_m3u8s, video_name = parse_url(inputMsg)
-    acfun_meta_message = Message(f"{GLOBAL_NICKNAME}识别：猴山，{video_name}")
+    await acfun.send(Message(f"{GLOBAL_NICKNAME}识别：猴山，{video_name}"))
     m3u8_full_urls, ts_names, output_folder_name, output_file_name = parse_m3u8(url_m3u8s)
     # logger.info(output_folder_name, output_file_name)
     await asyncio.gather(*[download_m3u8_videos(url, i) for i, url in enumerate(m3u8_full_urls)])
     merge_ac_file_to_mp4(ts_names, output_file_name)
     # await acfun.send(Message(MessageSegment.video(f"{os.getcwd()}/{output_file_name}")))
-    await auto_video_send(event, f"{os.getcwd()}/{output_file_name}", acfun_meta_message)
+    await auto_video_send(event, f"{os.getcwd()}/{output_file_name}")
 
 
 @twit.handle()
@@ -608,10 +564,7 @@ async def twitter(bot: Bot, event: Event):
     :return:
     """
     msg: str = str(event.message).strip()
-    x_match = re.search(r"https?:\/\/x.com\/[0-9-a-zA-Z_]{1,20}\/status\/([0-9]*)", msg)
-    if x_match is None:
-        return
-    x_url = x_match[0]
+    x_url = re.search(r"https?:\/\/x.com\/[0-9-a-zA-Z_]{1,20}\/status\/([0-9]*)", msg)[0]
 
     x_url = GENERAL_REQ_LINK.replace("{}", x_url)
 
@@ -637,7 +590,8 @@ async def twitter(bot: Bot, event: Event):
         x_data = x_req(x_url).json()['data']
 
     x_url_res = x_data['url']
-    x_meta_message = Message(f"{GLOBAL_NICKNAME}识别：小蓝鸟学习版")
+
+    await twit.send(Message(f"{GLOBAL_NICKNAME}识别：小蓝鸟学习版"))
 
     # 海外服务器判断
     proxy = None if IS_OVERSEA else resolver_proxy
@@ -653,7 +607,6 @@ async def twitter(bot: Bot, event: Event):
 
     # 图片走转发，视频直接发送
     if is_image_url(x_url_res):
-        await twit.send(x_meta_message)
         res = await download_img(x_url_res, '', proxy, headers={ "Referer": "https://x.com/" } | COMMON_HEADER)
         if res and os.path.exists(res):
             aio_task_res = auto_determine_send_type(int(bot.self_id), res)
@@ -666,7 +619,7 @@ async def twitter(bot: Bot, event: Event):
         # 视频
         res = await download_video(x_url_res, proxy)
         if res:
-            await auto_video_send(event, res, x_meta_message)
+            await auto_video_send(event, res)
 
 
 @xhs.handle()
@@ -722,11 +675,11 @@ async def xiaohongshu(bot: Bot, event: Event):
     type = note_data['type']
     note_title = note_data['title']
     note_desc = note_data['desc']
-    xhs_meta_message = Message(f"{GLOBAL_NICKNAME}识别：小红书，{note_title}\n{note_desc}")
+    await xhs.send(Message(
+        f"{GLOBAL_NICKNAME}识别：小红书，{note_title}\n{note_desc}"))
 
     aio_task = []
     if type == 'normal':
-        await xhs.send(xhs_meta_message)
         image_list = note_data['imageList']
         # 批量下载
         async with aiohttp.ClientSession() as session:
@@ -738,16 +691,13 @@ async def xiaohongshu(bot: Bot, event: Event):
         # 这是一条解析有水印的视频
         logger.info(note_data['video'])
 
-        video_url = await select_xhs_video_url(note_data, headers)
-        if not video_url:
-            await xhs.send(Message(f"{GLOBAL_NICKNAME}识别：小红书，视频链接不可用或不是视频内容"))
-            return
+        video_url = note_data['video']['media']['stream']['h264'][0]['masterUrl']
 
         # ⚠️ 废弃，解析无水印视频video.consumer.originVideoKey
         # video_url = f"http://sns-video-bd.xhscdn.com/{note_data['video']['consumer']['originVideoKey']}"
-        path = await download_video(video_url, ext_headers=headers)
+        path = await download_video(video_url)
         # await xhs.send(Message(MessageSegment.video(path)))
-        await auto_video_send(event, path, xhs_meta_message)
+        await auto_video_send(event, path)
         return
     # 发送图片
     links = make_node_segment(bot.self_id,
@@ -772,14 +722,11 @@ async def youtube(bot: Bot, event: Event):
 
     title = await get_video_title(msg_url, IS_OVERSEA, proxy)
 
+    await y2b.send(Message(f"{GLOBAL_NICKNAME}识别：油管，{title}\n"))
+
     target_ytb_video_path = await download_ytb_video(msg_url, IS_OVERSEA, os.getcwd(), proxy)
 
-    if target_ytb_video_path:
-        await auto_video_send(event, target_ytb_video_path, Message(f"{GLOBAL_NICKNAME}识别：油管，{title}\n"))
-        return
-
-    last_error = LAST_YTDLP_ERROR.get("message") if time.time() - float(LAST_YTDLP_ERROR.get("at") or 0) < 30 else ""
-    await y2b.send(Message(f"{GLOBAL_NICKNAME}识别：油管下载失败\n{last_error or '未知错误'}"))
+    await auto_video_send(event, target_ytb_video_path)
 
 
 @ncm.handle()
@@ -938,10 +885,9 @@ async def wb(bot: Bot, event: Event):
                                                                 ['text', 'status_title', 'source', 'region_name',
                                                                  'pics', 'page_info'])
     # 发送消息
-    weibo_meta_message = Message(
-        f"{GLOBAL_NICKNAME}识别：微博，{re.sub(r'<[^>]+>', '', text)}\n{status_title}\n{source}\t{region_name if region_name else ''}"
-    )
-    await weibo.send(weibo_meta_message)
+    await weibo.send(
+        Message(
+            f"{GLOBAL_NICKNAME}识别：微博，{re.sub(r'<[^>]+>', '', text)}\n{status_title}\n{source}\t{region_name if region_name else ''}"))
     if pics:
         pics = map(lambda x: x['url'], pics)
         download_img_funcs = [asyncio.create_task(download_img(item, '', headers={
@@ -963,7 +909,7 @@ async def wb(bot: Bot, event: Event):
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
                 "referer": "https://weibo.com/"
             })
-            await auto_video_send(event, path, weibo_meta_message)
+            await auto_video_send(event, path)
 
 
 def auto_determine_send_type(user_id: int, task: str):
@@ -1000,121 +946,36 @@ def make_node_segment(user_id, segments: Union[MessageSegment, List]) -> Union[
                                       content=Message(segments))
 
 
-def _get_message_id(result) -> Optional[int]:
-    if isinstance(result, dict):
-        message_id = result.get("message_id")
-        if message_id is None and isinstance(result.get("data"), dict):
-            message_id = result["data"].get("message_id")
-        if message_id is not None:
-            return int(message_id)
-    return None
-
-
-def _make_message_id_node(message_id: int) -> dict:
-    return { "type": "node", "data": { "id": str(message_id) } }
-
-
-def _message_from_node_content(content) -> Message:
-    if isinstance(content, Message):
-        return content
-    if isinstance(content, MessageSegment):
-        return Message(content)
-    if isinstance(content, list):
-        return Message(content)
-    return Message(str(content))
-
-
-def _collect_real_forward_items(payload) -> List[Union[Message, dict]]:
-    if payload is None:
-        return []
-
-    if isinstance(payload, dict):
-        if payload.get("type") == "node":
-            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-            if data.get("id"):
-                return [payload]
-            if "content" in data:
-                return [_message_from_node_content(data.get("content"))]
-        return [Message(str(payload))]
-
-    if isinstance(payload, MessageSegment):
-        if payload.type == "node":
-            data = payload.data
-            if data.get("id"):
-                return [{ "type": "node", "data": { "id": str(data["id"]) } }]
-            if "content" in data:
-                return [_message_from_node_content(data.get("content"))]
-            return []
-        return [Message(payload)]
-
-    if isinstance(payload, Message):
-        if not payload:
-            return []
-        if all(segment.type == "node" for segment in payload):
-            items: List[Union[Message, dict]] = []
-            for segment in payload:
-                items.extend(_collect_real_forward_items(segment))
-            return items
-        return [payload]
-
-    if isinstance(payload, (list, tuple)):
-        items: List[Union[Message, dict]] = []
-        for item in payload:
-            items.extend(_collect_real_forward_items(item))
-        return items
-
-    return [Message(str(payload))]
-
-
-async def _send_real_forward_nodes(bot: Bot, event: Event, messages: List[dict]) -> None:
-    if isinstance(event, GroupMessageEvent):
-        await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=messages)
-    else:
-        await bot.call_api("send_private_forward_msg", user_id=event.user_id, messages=messages)
-
-
 async def send_forward_both(bot: Bot, event: Event, segments: Union[MessageSegment, List]) -> None:
     """
-        自动判断 message 是 List 还是单个，然后发送{转发}，允许发送群和个人。
-        所有节点都会先发给机器人自己，再用真实 message_id 合并转发，规避部分客户端伪节点视频过期问题。
+        自动判断message是 List 还是单个，然后发送{转发}，允许发送群和个人
     :param bot:
     :param event:
     :param segments:
     :return:
     """
-    items = _collect_real_forward_items(segments)
-    if not items:
-        items = [Message("")]
-
-    forward_nodes: List[dict] = []
-    staged_message_ids: List[int] = []
-    for item in items:
-        if isinstance(item, dict) and item.get("type") == "node":
-            data = item.get("data") if isinstance(item.get("data"), dict) else {}
-            if data.get("id"):
-                forward_nodes.append({ "type": "node", "data": { "id": str(data["id"]) } })
-                continue
-
-        result = await bot.send_private_msg(user_id=int(bot.self_id), message=item)
-        message_id = _get_message_id(result)
-        if not message_id:
-            raise RuntimeError(f"发给自己的合并转发节点没有返回 message_id: {result}")
-        staged_message_ids.append(message_id)
-        forward_nodes.append(_make_message_id_node(message_id))
-
-    await _send_real_forward_nodes(bot, event, forward_nodes)
-    logger.info(f"已通过自发真实消息合并转发: message_ids={staged_message_ids}")
+    if isinstance(event, GroupMessageEvent):
+        await bot.send_group_forward_msg(group_id=event.group_id,
+                                         messages=segments)
+    else:
+        await bot.send_private_forward_msg(user_id=event.user_id,
+                                           messages=segments)
 
 
 async def send_both(bot: Bot, event: Event, segments: MessageSegment) -> None:
     """
-        自动判断 message 是 List 还是单个，统一走真实消息合并转发。
+        自动判断message是 List 还是单个，发送{单个消息}，允许发送群和个人
     :param bot:
     :param event:
     :param segments:
     :return:
     """
-    await send_forward_both(bot, event, segments)
+    if isinstance(event, GroupMessageEvent):
+        await bot.send_group_msg(group_id=event.group_id,
+                                 message=Message(segments))
+    elif isinstance(event, PrivateMessageEvent):
+        await bot.send_private_msg(user_id=event.user_id,
+                                   message=Message(segments))
 
 
 async def upload_both(bot: Bot, event: Event, file_path: str, name: str) -> None:
@@ -1141,222 +1002,11 @@ def get_id_both(event: Event):
         return event.user_id
 
 
-def _video_outbox_dir() -> Path:
-    if RESOLVER_VIDEO_OUTBOX_DIR:
-        return Path(RESOLVER_VIDEO_OUTBOX_DIR).expanduser()
-    return Path(os.getcwd()) / "resolver-video-outbox"
-
-
-def _video_outbox_path() -> Path:
-    return _video_outbox_dir() / "outbox.json"
-
-
-def _ensure_video_outbox_dir() -> None:
-    _video_outbox_dir().mkdir(parents=True, exist_ok=True)
-
-
-def _load_video_outbox() -> List[dict]:
-    outbox_path = _video_outbox_path()
-    if not outbox_path.exists():
-        return []
-    try:
-        payload = json.loads(outbox_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    return payload if isinstance(payload, list) else []
-
-
-def _dump_video_outbox(items: List[dict]) -> None:
-    _ensure_video_outbox_dir()
-    outbox_path = _video_outbox_path()
-    tmp_path = outbox_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp_path, outbox_path)
-
-
-def _upsert_video_outbox_item(item: dict) -> None:
-    items = [old for old in _load_video_outbox() if old.get("id") != item.get("id")]
-    items.append(item)
-    _dump_video_outbox(items)
-
-
-def _remove_video_outbox_item(item_id: str) -> None:
-    _dump_video_outbox([item for item in _load_video_outbox() if item.get("id") != item_id])
-
-
-def _cleanup_media_file(media_path: Optional[Union[str, Path]]) -> None:
-    if not media_path:
-        return
-    path = Path(media_path)
-    for candidate in (path, Path(f"{path}.jpg")):
-        try:
-            if candidate.exists():
-                candidate.unlink()
-        except Exception as exc:
-            logger.warning(f"删除临时媒体失败: {candidate}: {type(exc).__name__}: {exc}")
-
-
-def _ensure_video_thumbnail(media_path: str) -> None:
-    thumb_path = f"{media_path}.jpg"
-    if os.path.exists(thumb_path):
-        return
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return
-    try:
-        subprocess.run(
-            [ffmpeg, "-y", "-ss", "00:00:01", "-i", media_path, "-frames:v", "1", thumb_path],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-        )
-    except Exception as exc:
-        logger.warning(f"生成视频封面失败: {type(exc).__name__}: {exc}")
-
-
-def _copy_media_to_outbox(media_path: str, item_id: str) -> str:
-    _ensure_video_outbox_dir()
-    suffix = Path(media_path).suffix or ".mp4"
-    stored_path = _video_outbox_dir() / f"{item_id}{suffix}"
-    if Path(media_path).resolve() != stored_path.resolve():
-        shutil.copy2(media_path, stored_path)
-        thumb_path = Path(f"{media_path}.jpg")
-        if thumb_path.exists():
-            shutil.copy2(thumb_path, Path(f"{stored_path}.jpg"))
-        else:
-            _ensure_video_thumbnail(str(stored_path))
-    return str(stored_path)
-
-
-def _meta_message_to_string(meta_message) -> str:
-    if meta_message is None:
-        return ""
-    try:
-        return str(Message(meta_message))
-    except Exception:
-        return str(meta_message)
-
-
-def _event_target(event: Event) -> Optional[dict]:
-    if isinstance(event, GroupMessageEvent):
-        return { "target_kind": "group", "group_id": int(event.group_id), "user_id": None }
-    if isinstance(event, PrivateMessageEvent):
-        return { "target_kind": "private", "group_id": None, "user_id": int(event.user_id) }
-    return None
-
-
-async def _send_video_forward_item(bot: Bot, item: dict) -> None:
-    media_path = str(item.get("media_path") or "")
-    if not media_path or not os.path.exists(media_path):
-        raise FileNotFoundError(media_path or "<empty media_path>")
-
-    message_ids: List[int] = []
-    meta_message = str(item.get("meta_message") or "")
-    if meta_message:
-        meta_result = await bot.send_private_msg(user_id=int(bot.self_id), message=Message(meta_message))
-        meta_message_id = _get_message_id(meta_result)
-        if meta_message_id:
-            message_ids.append(meta_message_id)
-        else:
-            logger.warning(f"发给自己的元信息没有返回 message_id: {meta_result}")
-
-    _ensure_video_thumbnail(media_path)
-    video_result = await bot.send_private_msg(
-        user_id=int(bot.self_id),
-        message=Message(MessageSegment.video(f"file://{media_path}")),
-    )
-    video_message_id = _get_message_id(video_result)
-    if not video_message_id:
-        raise RuntimeError(f"发给自己的视频没有返回 message_id: {video_result}")
-    message_ids.append(video_message_id)
-
-    messages = [_make_message_id_node(message_id) for message_id in message_ids]
-    if item.get("target_kind") == "group":
-        await bot.call_api("send_group_forward_msg", group_id=int(item["group_id"]), messages=messages)
-    else:
-        await bot.call_api("send_private_forward_msg", user_id=int(item["user_id"]), messages=messages)
-    logger.info(f"已通过自发真实消息合并转发视频: message_ids={message_ids}")
-
-
-async def _retry_video_outbox(bot: Bot) -> None:
-    items = _load_video_outbox()
-    if not items:
-        return
-
-    logger.info(f"恢复待发送视频解析结果: count={len(items)}")
-    for item in items:
-        item_id = str(item.get("id") or "")
-        media_path = str(item.get("media_path") or "")
-        if not item_id:
-            continue
-        if not media_path or not os.path.exists(media_path):
-            logger.warning(f"待发送视频文件不存在，移除 outbox: id={item_id} path={media_path}")
-            _remove_video_outbox_item(item_id)
-            continue
-        try:
-            await _send_video_forward_item(bot, item)
-        except Exception as exc:
-            item["attempts"] = int(item.get("attempts") or 0) + 1
-            item["last_error"] = f"{type(exc).__name__}: {exc}"
-            item["last_attempt_at"] = time.time()
-            _upsert_video_outbox_item(item)
-            logger.warning(f"待发送视频解析结果重试失败: id={item_id} error={type(exc).__name__}: {exc}")
-            continue
-        _remove_video_outbox_item(item_id)
-        _cleanup_media_file(media_path)
-        logger.info(f"待发送视频解析结果已补发并清理: id={item_id}")
-
-
-async def _retry_video_outbox_on_connect(bot: Bot) -> None:
-    await _retry_video_outbox(bot)
-
-
-driver.on_bot_connect(_retry_video_outbox_on_connect)
-
-
-async def send_real_video_forward_both(bot: Bot, event: Event, meta_message, data_path: str) -> None:
-    target = _event_target(event)
-    if target is None:
-        await bot.send(event, Message(MessageSegment.video(f"file://{data_path}")))
-        return
-
-    item_id = uuid.uuid4().hex
-    stored_path = _copy_media_to_outbox(str(data_path), item_id)
-    item = {
-        "id": item_id,
-        "self_id": str(bot.self_id),
-        "created_at": time.time(),
-        "attempts": 0,
-        "last_error": "",
-        "media_path": stored_path,
-        "meta_message": _meta_message_to_string(meta_message),
-        **target,
-    }
-    _upsert_video_outbox_item(item)
-    if str(data_path) != stored_path:
-        _cleanup_media_file(data_path)
-
-    try:
-        await _send_video_forward_item(bot, item)
-    except Exception as exc:
-        item["attempts"] = int(item.get("attempts") or 0) + 1
-        item["last_error"] = f"{type(exc).__name__}: {exc}"
-        item["last_attempt_at"] = time.time()
-        _upsert_video_outbox_item(item)
-        logger.warning(f"视频解析结果发送失败，已保留等待重试: id={item_id} error={type(exc).__name__}: {exc}")
-        return
-
-    _remove_video_outbox_item(item_id)
-    _cleanup_media_file(stored_path)
-
-
-async def auto_video_send(event: Event, data_path: str, meta_message=None):
+async def auto_video_send(event: Event, data_path: str):
     """
     自动判断视频类型并进行发送，支持群发和私发
     :param event:
     :param data_path:
-    :param meta_message:
     :return:
     """
     try:
@@ -1365,8 +1015,6 @@ async def auto_video_send(event: Event, data_path: str, meta_message=None):
         # 如果data以"http"开头，先下载视频
         if data_path is not None and data_path.startswith("http"):
             data_path = await download_video(data_path)
-        if not data_path:
-            raise RuntimeError("视频下载失败，未得到可发送文件")
 
         # 检测文件大小
         file_size_in_mb = get_file_size_mb(data_path)
@@ -1377,9 +1025,12 @@ async def auto_video_send(event: Event, data_path: str, meta_message=None):
             await upload_both(bot, event, data_path, data_path.split('/')[-1])
             return
         # 根据事件类型发送不同的消息
-        await send_real_video_forward_both(bot, event, meta_message, data_path)
+        await send_both(bot, event, MessageSegment.video(f'file://{data_path}'))
     except Exception as e:
         logger.error(f"解析发送出现错误，具体为\n{e}")
     finally:
         # 删除临时文件
-        _cleanup_media_file(data_path)
+        if os.path.exists(data_path):
+            os.unlink(data_path)
+        if os.path.exists(data_path + '.jpg'):
+            os.unlink(data_path + '.jpg')
