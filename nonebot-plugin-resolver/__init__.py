@@ -424,12 +424,51 @@ async def dy(bot: Bot, event: Event) -> None:
             # 根据类型进行发送
             if url_type == 'video':
                 # 识别播放地址
-                player_uri = detail.get("video").get("play_addr")['uri']
-                player_real_addr = DY_TOUTIAO_INFO.replace("{}", player_uri)
-                cover = detail.get("video", {}).get("cover", {}).get("url_list", [None])[0]
+                video_info = detail.get("video", {}) or {}
+                play_addr = video_info.get("play_addr", {}) or {}
+                player_uri = play_addr.get('uri')
+                player_real_addr = DY_TOUTIAO_INFO.replace("{}", player_uri) if player_uri else None
+                cover = video_info.get("cover", {}).get("url_list", [None])[0]
                 meta_text = f"\n{GLOBAL_NICKNAME}识别：抖音，{detail.get('desc')}"
                 meta_node = Message([MessageSegment.image(cover), MessageSegment.text(meta_text)]) if cover else title_message
-                await send_real_video_forward_both(bot, event, meta_node, player_real_addr)
+                douyin_video_headers = {
+                    'referer': f'https://www.douyin.com/video/{dou_id}',
+                    'origin': 'https://www.douyin.com',
+                    'cookie': douyin_ck,
+                    'User-Agent': headers['User-Agent'],
+                }
+                video_candidates = []
+                if player_real_addr:
+                    video_candidates.append(player_real_addr)
+                video_candidates.extend(play_addr.get("url_list") or [])
+                for bit_rate in video_info.get("bit_rate", []) or []:
+                    bit_play_addr = (bit_rate or {}).get("play_addr", {}) or {}
+                    bit_uri = bit_play_addr.get("uri")
+                    if bit_uri:
+                        video_candidates.append(DY_TOUTIAO_INFO.replace("{}", bit_uri))
+                    video_candidates.extend(bit_play_addr.get("url_list") or [])
+
+                seen_video_urls = set()
+                video_candidates = [
+                    candidate for candidate in video_candidates
+                    if candidate and not (candidate in seen_video_urls or seen_video_urls.add(candidate))
+                ]
+                video_path = None
+                for video_candidate in video_candidates:
+                    video_path = await download_video(video_candidate, ext_headers=douyin_video_headers)
+                    if video_path and os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                        logger.info(f"抖音视频已下载: path={video_path}, size={os.path.getsize(video_path)}")
+                        break
+                    cleanup_media_file(video_path)
+                    video_path = None
+                if not video_path or not os.path.exists(video_path) or os.path.getsize(video_path) <= 0:
+                    await send_forward_both(bot, event, [
+                        meta_node,
+                        Message(f"{GLOBAL_NICKNAME}识别：抖音，视频下载失败，已停止转发。"),
+                    ])
+                    cleanup_media_file(video_path)
+                    return
+                await send_real_video_forward_both(bot, event, meta_node, video_path)
             elif url_type == 'image':
                 # 无水印图片列表/No watermark image list
                 no_watermark_image_list = [title_message]

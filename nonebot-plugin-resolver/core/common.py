@@ -74,7 +74,7 @@ async def download_video(url, proxy: str = None, ext_headers=None) -> str:
                     return None
         return path
     except Exception as e:
-        logger.warning(f"下载视频错误原因是: {e}")
+        logger.warning(f"下载视频错误原因是: {type(e).__name__}: {repr(e)}")
         if os.path.exists(path):
             os.remove(path)
         return None
