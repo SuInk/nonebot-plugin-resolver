@@ -3,7 +3,7 @@ import os
 import re
 import time
 from typing import List, Dict, Any
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse
 from nonebot import require, logger
 
 require("nonebot_plugin_localstore")
@@ -46,18 +46,37 @@ async def download_video(url, proxy: str = None, ext_headers=None) -> str:
         'follow_redirects': True
     }
     if proxy:
-        client_config['proxies'] = { 'https': proxy }
+        client_config['proxy'] = proxy
 
-    # 下载文件
+    # 下载文件。先校验状态码和响应类型，避免把 403/HTML 风控页保存成 mp4。
     try:
         async with httpx.AsyncClient(**client_config) as client:
             async with client.stream("GET", url) as resp:
+                content_type = (resp.headers.get("content-type") or "").lower()
+                if resp.status_code != 200 or "text/html" in content_type or content_type.startswith("text/"):
+                    logger.warning(
+                        f"视频下载链接不可用: status={resp.status_code}, "
+                        f"content-type={content_type or 'unknown'}, url={url}"
+                    )
+                    return None
+
+                wrote = 0
                 async with aiofiles.open(path, "wb") as f:
                     async for chunk in resp.aiter_bytes():
-                        await f.write(chunk)
+                        if chunk:
+                            wrote += len(chunk)
+                            await f.write(chunk)
+
+                if wrote == 0:
+                    logger.warning(f"视频下载为空文件: url={url}")
+                    if os.path.exists(path):
+                        os.remove(path)
+                    return None
         return path
     except Exception as e:
-        print(f"下载视频错误原因是: {e}")
+        logger.warning(f"下载视频错误原因是: {e}")
+        if os.path.exists(path):
+            os.remove(path)
         return None
 
 
@@ -73,26 +92,7 @@ async def download_img(url: str, path: str = '', proxy: str = None, session=None
     :return: 保存图片的路径。
     """
     if path == '':
-        parsed_url = urlparse(url)
-        filename = os.path.basename(parsed_url.path)
-        filename = unquote(filename)
-        filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
-
-        original_ext = os.path.splitext(filename)[1].lower()
-        ext = original_ext
-        if ext not in { ".jpg", ".jpeg", ".png", ".webp", ".gif" }:
-            query_params = parse_qs(parsed_url.query)
-            fmt = (query_params.get("format") or query_params.get("fmt") or [None])[0]
-            if fmt:
-                fmt = fmt.lower()
-                if fmt in { "jpg", "jpeg", "png", "webp", "gif" }:
-                    ext = f".{fmt}"
-        if not filename:
-            filename = f"{int(time.time())}{ext or '.jpg'}"
-        elif not original_ext:
-            filename = f"{filename}{ext or '.jpg'}"
-
-        path = os.path.join(os.getcwd(), filename)
+        path = os.path.join(os.getcwd(), url.split('/').pop())
     # 单个文件下载
     if session is None:
         async with aiohttp.ClientSession() as session:
