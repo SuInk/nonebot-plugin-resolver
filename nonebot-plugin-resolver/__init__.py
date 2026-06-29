@@ -251,11 +251,10 @@ async def bilibili(bot: Bot, event: Event) -> None:
                     break
             desc = paragraphs[0]['text']['nodes'][0]['word']['words']
             pics = paragraphs[1]['pic']['pics']
-            await bili23.send(Message(f"{GLOBAL_NICKNAME}识别：B站动态，{title}\n{desc}"))
-            send_pics = []
+            send_pics = [Message(f"{GLOBAL_NICKNAME}识别：B站动态，{title}\n{desc}")]
             for pic in pics:
                 img = pic['url']
-                send_pics.append(make_node_segment(bot.self_id, MessageSegment.image(img)))
+                send_pics.append(MessageSegment.image(img))
             # 发送异步后的数据
             await send_forward_both(bot, event, send_pics)
         return
@@ -290,15 +289,14 @@ async def bilibili(bot: Bot, event: Event) -> None:
         # https://space.bilibili.com/22990202/favlist?fid=2344812202
         fav_id = re.search(r'favlist\?fid=(\d+)', url).group(1)
         fav_list = (await get_video_favorite_list_content(fav_id))['medias'][:10]
-        favs = []
+        favs = [Message(f'{GLOBAL_NICKNAME}识别：哔哩哔哩收藏夹，正在为你找出相关链接请稍等...')]
         for fav in fav_list:
             title, cover, intro, link = fav['title'], fav['cover'], fav['intro'], fav['link']
             logger.info(title, cover, intro)
             favs.append(
-                [MessageSegment.image(cover),
-                 MessageSegment.text(f'🧉 标题：{title}\n📝 简介：{intro}\n🔗 链接：{link}')])
-        await bili23.send(f'{GLOBAL_NICKNAME}识别：哔哩哔哩收藏夹，正在为你找出相关链接请稍等...')
-        await bili23.send(make_node_segment(bot.self_id, favs))
+                Message([MessageSegment.image(cover),
+                         MessageSegment.text(f'🧉 标题：{title}\n📝 简介：{intro}\n🔗 链接：{link}')]))
+        await send_forward_both(bot, event, favs)
         return
     # 获取视频信息
     video_id = re.search(r"video\/[^\?\/ ]+", url)[0].split('/')[1]
@@ -497,7 +495,7 @@ async def dy(bot: Bot, event: Event) -> None:
                 # 异步发送
                 # logger.info(no_watermark_image_list)
                 # imgList = await asyncio.gather([])
-                await send_forward_both(bot, event, make_node_segment(bot.self_id, no_watermark_image_list))
+                await send_forward_both(bot, event, no_watermark_image_list)
 
 
 @tik.handle()
@@ -612,8 +610,8 @@ async def twitter(bot: Bot, event: Event):
     proxy = None if IS_OVERSEA else resolver_proxy
 
     # 图片
-    if x_url_res.endswith(".jpg") or x_url_res.endswith(".png"):
-        await twit.send(x_meta_message)
+    x_is_image = x_url_res.endswith(".jpg") or x_url_res.endswith(".png")
+    if x_is_image:
         res = await download_img(x_url_res, '', proxy)
     else:
         # 视频
@@ -627,7 +625,7 @@ async def twitter(bot: Bot, event: Event):
         return
     else:
         aio_task_res = auto_determine_send_type(int(bot.self_id), res)
-        await send_forward_both(bot, event, aio_task_res)
+        await send_forward_both(bot, event, [x_meta_message, aio_task_res] if x_is_image else aio_task_res)
 
     # 清除垃圾
     if os.path.exists(res):
@@ -925,10 +923,9 @@ async def wb(bot: Bot, event: Event):
     text, status_title, source, region_name, pics, page_info = (weibo_data.get(key, None) for key in
                                                                 ['text', 'status_title', 'source', 'region_name',
                                                                  'pics', 'page_info'])
-    # 发送消息
-    await weibo.send(
-        Message(
-            f"{GLOBAL_NICKNAME}识别：微博，{re.sub(r'<[^>]+>', '', text)}\n{status_title}\n{source}\t{region_name if region_name else ''}"))
+    weibo_meta_message = Message(
+        f"{GLOBAL_NICKNAME}识别：微博，{re.sub(r'<[^>]+>', '', text)}\n{status_title}\n{source}\t{region_name if region_name else ''}")
+    weibo_meta_sent = False
     if pics:
         pics = map(lambda x: x['url'], pics)
         download_img_funcs = [asyncio.create_task(download_img(item, '', headers={
@@ -936,21 +933,26 @@ async def wb(bot: Bot, event: Event):
                                                                                  } | COMMON_HEADER)) for item in pics]
         links_path = await asyncio.gather(*download_img_funcs)
         # 发送图片
-        links = make_node_segment(bot.self_id,
-                                  [MessageSegment.image(f"file://{link}") for link in links_path])
+        links = [weibo_meta_message] + [MessageSegment.image(f"file://{link}") for link in links_path]
         # 发送异步后的数据
         await send_forward_both(bot, event, links)
+        weibo_meta_sent = True
         # 清除图片
         for temp in links_path:
             os.unlink(temp)
     if page_info:
         video_url = page_info.get('urls', '').get('mp4_720p_mp4', '') or page_info.get('urls', '').get('mp4_hd_mp4', '')
         if video_url:
+            if not weibo_meta_sent:
+                await send_forward_both(bot, event, weibo_meta_message)
+                weibo_meta_sent = True
             path = await download_video(video_url, ext_headers={
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
                 "referer": "https://weibo.com/"
             })
             await auto_video_send(event, path)
+    if not weibo_meta_sent:
+        await send_forward_both(bot, event, weibo_meta_message)
 
 
 def auto_determine_send_type(user_id: int, task: str):
@@ -961,11 +963,9 @@ def auto_determine_send_type(user_id: int, task: str):
     :return:
     """
     if task.endswith("jpg") or task.endswith("png"):
-        return MessageSegment.node_custom(user_id=user_id, nickname=GLOBAL_NICKNAME,
-                                          content=Message(MessageSegment.image(task)))
+        return MessageSegment.image(f"file://{task}")
     elif task.endswith("mp4"):
-        return MessageSegment.node_custom(user_id=user_id, nickname=GLOBAL_NICKNAME,
-                                          content=Message(MessageSegment.video(task)))
+        return MessageSegment.video(f"file://{task}")
 
 
 def make_node_segment(user_id, segments: Union[MessageSegment, List]) -> Union[
@@ -988,49 +988,89 @@ def _coerce_node_content(segment) -> Message:
         return segment
     if isinstance(segment, MessageSegment):
         return Message(segment)
+    if isinstance(segment, list):
+        return Message(segment)
     return Message(str(segment))
 
 
-def _coerce_forward_nodes(user_id, segments: Union[Message, MessageSegment, List, str]) -> Union[
-    MessageSegment, Iterable[MessageSegment]]:
-    if isinstance(segments, Message):
-        node_segments = [segment for segment in segments if segment.type == "node"]
-        if node_segments and len(node_segments) == len(segments):
-            return node_segments
-        return MessageSegment.node_custom(user_id=user_id, nickname=GLOBAL_NICKNAME,
-                                          content=segments)
+def _collect_real_forward_items(payload) -> list[Message | dict]:
+    if payload is None:
+        return []
 
-    if isinstance(segments, MessageSegment):
-        if segments.type == "node":
-            return segments
-        return MessageSegment.node_custom(user_id=user_id, nickname=GLOBAL_NICKNAME,
-                                          content=Message(segments))
+    if isinstance(payload, dict):
+        if payload.get("type") == "node":
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            if data.get("id"):
+                return [{"type": "node", "data": {"id": str(data["id"])}}]
+            if "content" in data:
+                return [_coerce_node_content(data.get("content"))]
+        return [Message(str(payload))]
 
-    if isinstance(segments, list):
-        if all(isinstance(segment, MessageSegment) and segment.type == "node" for segment in segments):
-            return segments
-        return [MessageSegment.node_custom(user_id=user_id, nickname=GLOBAL_NICKNAME,
-                                           content=_coerce_node_content(segment)) for segment in segments]
+    if isinstance(payload, MessageSegment):
+        if payload.type == "node":
+            data = payload.data
+            if data.get("id"):
+                return [{"type": "node", "data": {"id": str(data["id"])}}]
+            if "content" in data:
+                return [_coerce_node_content(data.get("content"))]
+            return []
+        return [Message(payload)]
 
-    return MessageSegment.node_custom(user_id=user_id, nickname=GLOBAL_NICKNAME,
-                                      content=Message(str(segments)))
+    if isinstance(payload, Message):
+        if not payload:
+            return []
+        if all(segment.type == "node" for segment in payload):
+            items: list[Message | dict] = []
+            for segment in payload:
+                items.extend(_collect_real_forward_items(segment))
+            return items
+        return [payload]
+
+    if isinstance(payload, (list, tuple)):
+        items: list[Message | dict] = []
+        for item in payload:
+            items.extend(_collect_real_forward_items(item))
+        return items
+
+    return [Message(str(payload))]
 
 
 async def send_forward_both(bot: Bot, event: Event, segments: Union[MessageSegment, List]) -> None:
     """
-        自动判断message是 List 还是单个，然后发送{转发}，允许发送群和个人
+        先把每个节点发给机器人自己，再用真实 message_id 合并转发到目标会话。
+        这样所有平台的转发节点用户名、头像和 NapCat 展示逻辑保持一致。
     :param bot:
     :param event:
     :param segments:
     :return:
     """
-    segments = _coerce_forward_nodes(bot.self_id, segments)
+    items = _collect_real_forward_items(segments)
+    if not items:
+        items = [Message("")]
+
+    forward_nodes = []
+    staged_message_ids = []
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "node":
+            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+            if data.get("id"):
+                forward_nodes.append({"type": "node", "data": {"id": str(data["id"])}})
+                continue
+
+        result = await bot.send_private_msg(user_id=int(bot.self_id), message=item)
+        message_id = _get_message_id(result)
+        if not message_id:
+            raise RuntimeError(f"发给自己的合并转发节点没有返回 message_id: {result}")
+        staged_message_ids.append(message_id)
+        forward_nodes.append(_make_message_id_node(message_id))
+
     if isinstance(event, GroupMessageEvent):
         await bot.send_group_forward_msg(group_id=event.group_id,
-                                         messages=segments)
+                                         messages=forward_nodes)
     else:
         await bot.send_private_forward_msg(user_id=event.user_id,
-                                           messages=segments)
+                                           messages=forward_nodes)
+    logger.info(f"已通过自发真实消息合并转发 resolver: message_ids={staged_message_ids}")
 
 
 async def send_both(bot: Bot, event: Event, segments: Union[Message, MessageSegment, List, str]) -> None:
